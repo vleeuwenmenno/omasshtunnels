@@ -15,18 +15,9 @@ There are no Python packages to install. Developed against Omarchy 4.0.4.
 omarchy plugin add https://github.com/vleeuwenmenno/omasshtunnels.git --enable
 ```
 
-## Install a local development copy
-
-From this directory:
-
-```sh
-python3 install.py --enable
-```
-
-The installer validates the plugin, copies its runtime files to
-`~/.config/omarchy/plugins/vleeuwenmenno.sshtunnels/`, rescans, and enables the bar widget.
-An existing local installation is backed up before replacement. It never
-changes SSH configuration or starts a tunnel.
+Omarchy manages the plugin checkout and bar entry. No separate installer or
+setup script is needed. Update a git-managed installation with
+`omarchy plugin update vleeuwenmenno.sshtunnels`.
 
 ## Use
 
@@ -113,6 +104,29 @@ cache; **Refresh** or right-clicking the bar icon forces full resolution.
 - If an alias or forwarding entry disappears while a tunnel is running, the
   active tunnel remains listed so you can stop it.
 
+## Runtime executables and environment
+
+The widget starts `/usr/bin/python3 -I -S` with a cleared environment. Isolated
+mode excludes user Python modules and `PYTHON*` configuration; `-S` also skips
+site initialization. It does not search your session's PATH for Python.
+
+The helper uses `/usr/bin/ssh`, resolving it to an absolute file and verifying
+that the file and its parent directories are root-owned and not writable by
+group or others. A missing or untrusted executable is an error; there is no
+fallback to PATH. This applies to discovery, connection startup, status, and Stop.
+
+Both process boundaries preserve only `HOME`, `XDG_CONFIG_HOME`,
+`XDG_RUNTIME_DIR`, `LANG`, `LC_ALL`, `LC_CTYPE`, `LC_MESSAGES`, and `SSH_AUTH_SOCK`
+when set. PATH is fixed to `/usr/bin` for OpenSSH's configured child commands.
+Loader overrides, shell startup variables, Python configuration, and unrelated
+session credentials are not inherited. SSH-agent authentication remains usable.
+
+Your SSH configuration remains trusted input: explicitly configured commands
+such as `Match exec`, `ProxyCommand`, and known-hosts helpers can still run.
+Commands or Includes that depend on additional session variables or executables
+outside `/usr/bin` need explicit paths/configuration; those variables are not
+automatically forwarded. There is no blanket environment passthrough option.
+
 ## How the plugin works
 
 | File | Purpose |
@@ -128,8 +142,9 @@ This is one `bar-widget`; its nested popup does not need a separate manifest
 kind. It uses Omarchy's shared UI components and theme tokens. The helper runs
 SSH with argument arrays rather than assembling shell command strings.
 
-Edit source here and rerun `python3 install.py --enable` to install a new copy.
-Omarchy hot-reloads installed QML. Force discovery with
+For development, edit the git checkout installed by `omarchy plugin add` under
+`~/.config/omarchy/plugins/vleeuwenmenno.sshtunnels/`. Omarchy hot-reloads installed
+QML. Force discovery with
 `omarchy-shell shell rescanPlugins` if needed. Debug the running widget with
 `qs log -p /usr/share/omarchy/shell --tail 100`.
 
@@ -140,12 +155,19 @@ omarchy plugin validate .
 python3 -m unittest discover -s tests -v
 node tests/test_model.cjs
 python3 tests/integration.py
+python3 tests/test_qml_runtime.py
 ```
 
 The integration test requires `sshd` and permission to open loopback sockets.
 It creates temporary keys, an SSH server, and an echo endpoint; checks actual
 traffic, port-conflict handling, reload persistence, and session isolation;
 then shuts them down. It never connects to your configured remote hosts.
+
+The backend tests require the real root ownership of `/usr/bin/ssh` and its
+parent directories. A user namespace that remaps system owners cannot validate
+them. The QML regression test requires Quickshell;
+it runs the actual controller offscreen with harmless shadow executables and a
+temporary diagnostic helper to check both startup and polling environments.
 
 `qmllint` needs a temporary import root containing `qs` pointing to the installed
 `/usr/share/omarchy/shell` directory. The installed shell's dynamically typed

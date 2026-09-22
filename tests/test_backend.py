@@ -1,8 +1,11 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
+import stat
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -163,6 +166,65 @@ class BackendTests(unittest.TestCase):
         self.save()
         self.assertEqual(self.backend.data_file.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.backend.runtime.stat().st_mode & 0o777, 0o700)
+
+    def test_shadow_ssh_and_unrelated_environment_are_ignored(self):
+        shadow = self.base / "shadow"
+        shadow.mkdir()
+        marker = self.base / "shadow-ran"
+        (shadow / "ssh").write_text(f"#!/bin/sh\nprintf shadow > '{marker}'\nexit 97\n")
+        (shadow / "ssh").chmod(0o755)
+        with patch.dict(os.environ, {"PATH": str(shadow), "PYTHONPATH": str(shadow),
+                                    "LD_PRELOAD": "/nonexistent-test-loader.so", "BASH_ENV": str(shadow),
+                                    "SESSION_SECRET": "do-not-inherit", "SSH_AUTH_SOCK": "/test/agent.sock"}):
+            backend = tunnels.Backend(self.config, self.dropins, self.base / "data", self.base / "run", self.system)
+            result = backend.run(["-V"])
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("OpenSSH", result.stderr)
+        self.assertFalse(marker.exists())
+        self.assertEqual(backend.environment["PATH"], "/usr/bin")
+        self.assertEqual(backend.environment["SSH_AUTH_SOCK"], "/test/agent.sock")
+        self.assertLessEqual(set(backend.environment), set(tunnels.ENVIRONMENT_KEYS) | {"PATH"})
+        for key in ("PYTHONPATH", "LD_PRELOAD", "BASH_ENV", "SESSION_SECRET"):
+            self.assertNotIn(key, backend.environment)
+
+    def test_start_uses_pinned_ssh_and_explicit_environment(self):
+        row = dict(self.save(), configured=False)
+        with patch.object(self.backend, "active", side_effect=[False, True]), \
+                patch.object(self.backend, "snapshot", return_value={"tunnels": [row]}), \
+                patch.object(self.backend, "catalog", return_value=([], [], [])), \
+                patch.object(self.backend, "control", return_value=subprocess.CompletedProcess([], 0, "", "")), \
+                patch.object(tunnels.subprocess, "Popen") as popen:
+            popen.return_value.wait.return_value = 0
+            self.backend.start(row["id"])
+        self.assertEqual(popen.call_args.args[0][0], str(Path("/usr/bin/ssh").resolve()))
+        self.assertEqual(popen.call_args.kwargs["env"], self.backend.environment)
+
+    def test_discovery_and_control_use_pinned_ssh_and_explicit_environment(self):
+        with patch.object(tunnels.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
+            self.backend.resolve("dev", [], str(self.config))
+            self.backend.control("saved:test", "check")
+            self.backend.control("saved:test", "exit")
+        self.assertEqual(len(run.call_args_list), 3)
+        for call in run.call_args_list:
+            self.assertEqual(call.args[0][0], str(Path("/usr/bin/ssh").resolve()))
+            self.assertEqual(call.kwargs["env"], self.backend.environment)
+
+    def test_untrusted_ssh_is_rejected_without_path_fallback(self):
+        executable = self.base / "ssh"
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o755)
+        for candidate in ("ssh", str(executable), str(self.base / "missing-ssh")):
+            with self.subTest(candidate=candidate), self.assertRaises(tunnels.TunnelError):
+                tunnels.trusted_executable(candidate)
+        with patch.object(tunnels, "SSH_EXECUTABLE", str(executable)), self.assertRaises(tunnels.TunnelError):
+            tunnels.Backend(self.config, self.dropins, self.base / "data", self.base / "run", self.system)
+
+    def test_writable_or_non_root_system_paths_are_rejected(self):
+        for owner, mode in ((1000, stat.S_IFREG | 0o755), (0, stat.S_IFREG | 0o775), (0, stat.S_IFREG | 0o757)):
+            with self.subTest(owner=owner, mode=mode), \
+                    patch.object(Path, "stat", return_value=SimpleNamespace(st_uid=owner, st_mode=mode)), \
+                    self.assertRaises(tunnels.TunnelError):
+                tunnels.trusted_executable("/usr/bin/ssh")
 
 
 if __name__ == "__main__":

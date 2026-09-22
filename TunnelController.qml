@@ -25,7 +25,7 @@ Item {
         action = operation;
         actionId = payload && payload.id ? payload.id : "";
         if (operation !== "list") error = "";
-        worker.command = ["python3", root.helper, operation, JSON.stringify(payload || {})];
+        worker.command = ["/usr/bin/python3", "-I", "-S", root.helper, operation, JSON.stringify(payload || {})];
         worker.running = true;
     }
 
@@ -42,6 +42,20 @@ Item {
 
     Process {
         id: worker
+        // Clear the environment before Python's loader runs. With
+        // clearEnvironment, null copies only the named variable, if present.
+        clearEnvironment: true
+        environment: ({
+            PATH: "/usr/bin",
+            HOME: null,
+            XDG_CONFIG_HOME: null,
+            XDG_RUNTIME_DIR: null,
+            LANG: null,
+            LC_ALL: null,
+            LC_CTYPE: null,
+            LC_MESSAGES: null,
+            SSH_AUTH_SOCK: null
+        })
         stdout: StdioCollector { id: output; waitForEnd: true }
         stderr: StdioCollector { id: errors; waitForEnd: true }
         onExited: function(exitCode) {

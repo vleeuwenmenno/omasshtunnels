@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -IS
 """SSH configuration discovery and isolated tunnel control. Standard library only."""
 
 from __future__ import annotations
@@ -26,6 +26,37 @@ import uuid
 
 class TunnelError(Exception):
     pass
+
+
+SSH_EXECUTABLE = "/usr/bin/ssh"
+ENVIRONMENT_KEYS = ("HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "LANG",
+                    "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "SSH_AUTH_SOCK")
+
+
+def runtime_environment():
+    # This is also enforced for direct CLI calls. Never forward loader,
+    # interpreter, shell startup, or arbitrary session variables to SSH.
+    environment = {key: os.environ[key] for key in ENVIRONMENT_KEYS if os.environ.get(key)}
+    environment["PATH"] = "/usr/bin"
+    return environment
+
+
+def trusted_executable(filename):
+    """Resolve a system executable only through root-owned, non-writable paths."""
+    path = Path(filename)
+    if not path.is_absolute():
+        raise TunnelError("SSH executable must have an absolute path.")
+    try:
+        resolved = path.resolve(strict=True)
+        for candidate in {path, resolved, *path.parents, *resolved.parents}:
+            info = candidate.stat()
+            if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                raise TunnelError(f"Untrusted SSH executable path: {candidate}")
+        if not stat.S_ISREG(resolved.stat().st_mode) or not os.access(resolved, os.X_OK):
+            raise TunnelError(f"SSH executable is not an executable file: {resolved}")
+    except OSError as error:
+        raise TunnelError(f"Cannot validate system OpenSSH at {path}: {error}") from error
+    return str(resolved)
 
 
 def private_dir(path):
@@ -85,6 +116,8 @@ def directive(line):
 
 class Backend:
     def __init__(self, ssh_config=None, config_dir=None, data_dir=None, runtime_dir=None, system_config=None):
+        self.ssh = trusted_executable(SSH_EXECUTABLE)
+        self.environment = runtime_environment()
         home = Path.home()
         self.ssh_config = Path(ssh_config or home / ".ssh/config").expanduser()
         self.config_dir = Path(config_dir or home / ".ssh/config.d").expanduser()
@@ -170,10 +203,9 @@ class Backend:
             self.wrapper.chmod(0o600)
         return ["-F", str(self.wrapper)]
 
-    @staticmethod
-    def run(args, timeout=5):
+    def run(self, args, timeout=5):
         try:
-            return subprocess.run(["ssh", *args], stdin=subprocess.DEVNULL,
+            return subprocess.run([self.ssh, *args], env=self.environment, stdin=subprocess.DEVNULL,
                                   capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired as error:
             raise TunnelError("SSH timed out. Check the host, network, and authentication.") from error
@@ -369,7 +401,7 @@ class Backend:
             # A background master inherits stderr. A file avoids keeping the
             # helper's output pipe open for the entire lifetime of the tunnel.
             with log.open("w") as stderr:
-                process = subprocess.Popen(["ssh", *args], stdin=subprocess.DEVNULL,
+                process = subprocess.Popen([self.ssh, *args], env=self.environment, stdin=subprocess.DEVNULL,
                                            stdout=subprocess.DEVNULL, stderr=stderr,
                                            start_new_session=True)
                 try:
@@ -396,6 +428,9 @@ class Backend:
 
 
 def main():
+    environment = runtime_environment()
+    os.environ.clear()
+    os.environ.update(environment)
     parser = argparse.ArgumentParser(description=__doc__)
     for option in ("ssh-config", "config-dir", "data-dir", "runtime-dir"):
         parser.add_argument("--" + option)

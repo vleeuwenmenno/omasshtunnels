@@ -1,14 +1,15 @@
 """Exercise real OpenSSH forwarding against a temporary loopback-only SSH server."""
 
 import getpass
+import os
 from pathlib import Path
-import shutil
 import socket
 import socketserver
 import subprocess
 import tempfile
 import threading
 import time
+from unittest.mock import patch
 
 from test_backend import tunnels
 
@@ -35,7 +36,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="ssh-integration-") as directory:
         base = Path(directory)
         for name in ("host_key", "client_key"):
-            subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(base / name)], check=True)
+            subprocess.run(["/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(base / name)], check=True)
         ssh_port = free_port()
         echo = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Echo)
         thread = threading.Thread(target=echo.serve_forever, daemon=True)
@@ -63,7 +64,7 @@ LogLevel ERROR
   HostName 127.0.0.1
   Port {ssh_port}
   User {getpass.getuser()}
-  IdentityFile {base / 'client_key'}
+  IdentityFile {base / 'client_key.pub'}
   IdentitiesOnly yes
   UserKnownHostsFile {base / 'known_hosts'}
   ControlPath {base / 'unrelated.sock'}
@@ -71,11 +72,22 @@ LogLevel ERROR
 """)
         system = base / "system"
         system.write_text("")
+        agent_socket = base / "agent.sock"
+        agent = subprocess.Popen(["/usr/bin/ssh-agent", "-D", "-a", str(agent_socket)],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        agent_environment = patch.dict(os.environ, {"SSH_AUTH_SOCK": str(agent_socket)})
+        agent_environment.start()
         backend = tunnels.Backend(client_config, base / "config.d", base / "data", base / "run", system)
         started = []
         with (base / "sshd.log").open("w+") as log:
-            server = subprocess.Popen([shutil.which("sshd"), "-D", "-e", "-f", str(server_config)], stderr=log)
+            server = subprocess.Popen(["/usr/bin/sshd", "-D", "-e", "-f", str(server_config)], stderr=log)
             try:
+                for _ in range(50):
+                    if agent_socket.exists():
+                        break
+                    time.sleep(0.02)
+                subprocess.run(["/usr/bin/ssh-add", str(base / "client_key")], env=backend.environment,
+                               check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 for _ in range(50):
                     if server.poll() is not None:
                         log.seek(0)
@@ -89,7 +101,7 @@ LogLevel ERROR
                     raise RuntimeError("Test SSH server did not start")
 
                 # A separate master represents a normal terminal session.
-                subprocess.run(["ssh", "-F", str(client_config), "-MNf", "-o", "BatchMode=yes",
+                subprocess.run(["/usr/bin/ssh", "-F", str(client_config), "-MNf", "-o", "BatchMode=yes",
                                 "-o", "StrictHostKeyChecking=yes", "-o", "ClearAllForwardings=yes",
                                 "integration"], check=True)
                 ports = [free_port(), free_port()]
@@ -127,17 +139,20 @@ LogLevel ERROR
                 reloaded.stop(started[0])
                 assert not reloaded.active(started[0])
                 traffic(ports[1])
-                result = subprocess.run(["ssh", "-F", "/dev/null", "-S", str(base / "unrelated.sock"),
+                result = subprocess.run(["/usr/bin/ssh", "-F", "/dev/null", "-S", str(base / "unrelated.sock"),
                                          "-O", "check", "localhost"], capture_output=True)
                 assert result.returncode == 0, "Stopping a tunnel killed an unrelated session"
-                print("PASS: two independent saved tunnels carry traffic; config forwards work; port conflicts fail; reload preserves status; Stop leaves other sessions running.")
+                print("PASS: SSH-agent authentication works with the restricted environment; two saved tunnels carry traffic; config forwards work; port conflicts fail; reload preserves status; Stop leaves other sessions running.")
             finally:
                 for tunnel_id in started:
                     backend.stop(tunnel_id)
-                subprocess.run(["ssh", "-F", "/dev/null", "-S", str(base / "unrelated.sock"),
+                subprocess.run(["/usr/bin/ssh", "-F", "/dev/null", "-S", str(base / "unrelated.sock"),
                                 "-O", "exit", "localhost"], capture_output=True)
                 server.terminate()
                 server.wait(timeout=5)
+                agent.terminate()
+                agent.wait(timeout=5)
+                agent_environment.stop()
                 echo.shutdown()
                 echo.server_close()
 
