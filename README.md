@@ -51,6 +51,22 @@ The JSON file may be a symlink to a dotfiles checkout. Saves, edits, favorites,
 and removals preserve that link and atomically update its target with mode
 `0600`. A broken symlink is an error; restore its target before saving.
 
+## Remove
+
+Stop every active tunnel using its **Stop** button before removing the plugin.
+Removing or disabling the widget does not terminate its SSH connections.
+
+```sh
+omarchy plugin remove vleeuwenmenno.sshtunnels
+```
+
+This removes the plugin and its bar entry. Saved tunnels and stars remain in
+`${XDG_CONFIG_HOME:-~/.config}/omasshtunnels/tunnels.json`, so reinstalling restores
+them. Your SSH configuration, keys, and unrelated SSH sessions are unchanged.
+
+If the widget was removed while a tunnel was running, reinstall it to regain
+its Stop button. The helper discovers its existing control sockets.
+
 ## SSH configuration
 
 The plugin discovers literal `Host` aliases in `~/.ssh/config`, its `Include`
