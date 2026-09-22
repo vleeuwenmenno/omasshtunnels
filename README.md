@@ -6,6 +6,9 @@ starring favorites, and starting or stopping individual tunnels.
 Requires Omarchy 4 with the Quickshell plugin host, Python 3, and OpenSSH.
 There are no Python packages to install. Developed against Omarchy 4.0.4.
 
+<img width="559" height="666" alt="image" src="https://github.com/user-attachments/assets/9c483c4d-3b79-44ec-8697-dd39d2c77b97" />
+
+
 ## Install
 
 ```sh
